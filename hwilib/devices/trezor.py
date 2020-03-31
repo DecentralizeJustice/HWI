@@ -80,7 +80,7 @@ def interactive_get_pin(self, code=None):
     echo(PIN_MATRIX_DESCRIPTION)
 
     while True:
-        pin = prompt("Please enter {}".format(desc), hide_input=True)
+        pin = prompt("Please enter {}".format(desc), hide_input=False)
         if not pin.isdigit():
             echo("Non-numerical PIN provided, please try again")
         else:
