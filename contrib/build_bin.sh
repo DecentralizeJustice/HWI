@@ -29,10 +29,9 @@ unset PYTHONHASHSEED
 
 # Make the final compressed package
 pushd dist
-VERSION=`poetry run hwi --version | cut -d " " -f 2`
 OS=`uname | tr '[:upper:]' '[:lower:]'`
 if [[ $OS == "darwin" ]]; then
     OS="mac"
 fi
-tar -czf "hwi-${VERSION}-${OS}-amd64.tar.gz" hwi
+tar -czf "hwi-${OS}-amd64.tar.gz" hwi
 popd
