@@ -46,7 +46,7 @@ before_install:
     mv travis-wait-enhanced /home/travis/bin/
     travis-wait-enhanced --version
 install:
-    - pip install pipenv pysdl2 protobuf poetry construct mnemonic pyelftools
+    - pip install pipenv pysdl2 protobuf poetry==1.0.10 construct mnemonic pyelftools
     # From trezor-mcu to get the correct protobuf version
     - curl -LO "https://github.com/google/protobuf/releases/download/v3.4.0/protoc-3.4.0-linux-x86_64.zip"
     - unzip "protoc-3.4.0-linux-x86_64.zip" -d protoc
@@ -68,7 +68,9 @@ jobs:
             stage: lint
             install:
                 - pip install mypy
-            script: mypy hwilib/base58.py
+                - pip install poetry
+                - poetry install
+            script: mypy --implicit-reexport --strict hwilib/base58.py hwilib/errors.py hwilib/serializations.py hwilib/hwwclient.py hwilib/devices/bitbox02.py hwilib/key.py
         -   name: Run non-device tests only
             stage: test
             install:
@@ -118,9 +120,6 @@ jobs:
             stage: test
             os: osx
             language: generic
-            addons:
-                artifacts:
-                    working_dir: dist
             before_install:
             install:
                 - brew update && brew upgrade pyenv

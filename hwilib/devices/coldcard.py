@@ -1,13 +1,47 @@
 # Coldcard interaction script
 
-from binascii import b2a_hex
+from typing import Dict, Union
+
 from ..hwwclient import HardwareWalletClient
-from ..errors import ActionCanceledError, BadArgumentError, DeviceBusyError, DeviceFailureError, UnavailableActionError, common_err_msgs, handle_errors
-from .ckcc.client import ColdcardDevice, COINKITE_VID, CKCC_PID
-from .ckcc.protocol import CCProtocolPacker, CCBusyError, CCProtoError, CCUserRefused
-from .ckcc.constants import MAX_BLK_LEN, AF_P2WPKH, AF_CLASSIC, AF_P2WPKH_P2SH
-from ..base58 import get_xpub_fingerprint, xpub_main_2_test
-from ..serializations import ExtendedKey, PSBT
+from ..errors import (
+    ActionCanceledError,
+    BadArgumentError,
+    DeviceBusyError,
+    DeviceFailureError,
+    UnavailableActionError,
+    common_err_msgs,
+    handle_errors,
+)
+from .ckcc.client import (
+    ColdcardDevice,
+    COINKITE_VID,
+    CKCC_PID,
+)
+from .ckcc.protocol import (
+    CCProtocolPacker,
+    CCBusyError,
+    CCProtoError,
+    CCUserRefused,
+)
+from .ckcc.constants import (
+    MAX_BLK_LEN,
+    AF_P2WPKH,
+    AF_CLASSIC,
+    AF_P2WPKH_P2SH,
+    AF_P2WSH,
+    AF_P2SH,
+    AF_P2WSH_P2SH,
+)
+from ..base58 import (
+    get_xpub_fingerprint,
+    xpub_main_2_test,
+)
+from ..key import (
+    ExtendedKey,
+)
+from ..serializations import (
+    PSBT,
+)
 from hashlib import sha256
 
 import base64
@@ -16,10 +50,34 @@ import io
 import sys
 import time
 import struct
-from binascii import hexlify
+from binascii import hexlify, a2b_hex, b2a_hex
 
 CC_SIMULATOR_SOCK = '/tmp/ckcc-simulator.sock'
 # Using the simulator: https://github.com/Coldcard/firmware/blob/master/unix/README.md
+
+
+def str_to_int_path(xfp, path):
+    # convert text  m/34'/33/44 into BIP174 binary compat format
+    # - include hex for fingerprint (m) as first arg
+
+    rv = [struct.unpack('<I', a2b_hex(xfp))[0]]
+    for i in path.split('/'):
+        if i == 'm':
+            continue
+        if not i:
+            continue      # trailing or duplicated slashes
+
+        if i[-1] in "'phHP":
+            assert len(i) >= 2, i
+            here = int(i[:-1]) | 0x80000000
+        else:
+            here = int(i)
+            assert 0 <= here < 0x80000000, here
+
+        rv.append(here)
+
+    return rv
+
 
 def coldcard_exception(f):
     def func(*args, **kwargs):
@@ -64,7 +122,7 @@ class ColdcardClient(HardwareWalletClient):
             result.update(xpub_obj.get_printable_dict())
         return result
 
-    def _get_fingerprint_hex(self):
+    def get_master_fingerprint_hex(self):
         # quick method to get fingerprint of wallet
         return hexlify(struct.pack('<I', self.device.master_fingerprint)).decode()
 
@@ -84,12 +142,12 @@ class ColdcardClient(HardwareWalletClient):
             our_keys = 0
             for key in psbt_in.hd_keypaths.keys():
                 keypath = psbt_in.hd_keypaths[key]
-                if keypath[0] == master_fp and key not in psbt_in.partial_sigs:
+                if keypath.fingerprint == master_fp and key not in psbt_in.partial_sigs:
                     our_keys += 1
             if our_keys > passes:
                 passes = our_keys
 
-        for i in range(0, passes):
+        for _ in range(passes):
             # Get psbt in hex and then make binary
             fd = io.BytesIO(base64.b64decode(tx.serialize()))
 
@@ -141,15 +199,18 @@ class ColdcardClient(HardwareWalletClient):
             tx.deserialize(base64.b64encode(result).decode())
         return {'psbt': tx.serialize()}
 
-    # Must return a base64 encoded string with the signed message
-    # The message can be any string. keypath is the bip 32 derivation path for the key to sign with
     @coldcard_exception
-    def sign_message(self, message, keypath):
+    def sign_message(self, message: Union[str, bytes], keypath: str) -> Dict[str, str]:
         self.device.check_mitm()
         keypath = keypath.replace('h', '\'')
         keypath = keypath.replace('H', '\'')
 
-        ok = self.device.send_recv(CCProtocolPacker.sign_message(message.encode(), keypath, AF_CLASSIC), timeout=None)
+        msg = message
+        if not isinstance(message, bytes):
+            msg = message.encode()
+        ok = self.device.send_recv(
+            CCProtocolPacker.sign_message(msg, keypath, AF_CLASSIC), timeout=None
+        )
         assert ok is None
         if self.device.is_simulator:
             self.device.send_recv(CCProtocolPacker.sim_keypress(b'y'))
@@ -165,25 +226,59 @@ class ColdcardClient(HardwareWalletClient):
         if len(done) != 2:
             raise DeviceFailureError('Failed: %r' % done)
 
-        addr, raw = done
+        _, raw = done
 
         sig = str(base64.b64encode(raw), 'ascii').replace('\n', '')
         return {"signature": sig}
 
-    # Display address of specified type on the device. Only supports single-key based addresses.
+    # Display address of specified type on the device.
     @coldcard_exception
-    def display_address(self, keypath, p2sh_p2wpkh, bech32):
+    def display_address(self, keypath, p2sh_p2wpkh, bech32, redeem_script=None, descriptor=None):
         self.device.check_mitm()
         keypath = keypath.replace('h', '\'')
         keypath = keypath.replace('H', '\'')
 
         if p2sh_p2wpkh:
-            format = AF_P2WPKH_P2SH
+            addr_fmt = AF_P2WSH_P2SH if redeem_script else AF_P2WPKH_P2SH
         elif bech32:
-            format = AF_P2WPKH
+            addr_fmt = AF_P2WSH if redeem_script else AF_P2WPKH
         else:
-            format = AF_CLASSIC
-        address = self.device.send_recv(CCProtocolPacker.show_address(keypath, format), timeout=None)
+            addr_fmt = AF_P2SH if redeem_script else AF_CLASSIC
+
+        if redeem_script:
+            keypaths = keypath.split(',')
+            script = a2b_hex(redeem_script)
+
+            N = len(keypaths)
+
+            if not 1 <= N <= 15:
+                raise BadArgumentError("Must provide 1 to 15 keypaths to display a multisig address")
+
+            min_signers = script[0] - 80
+            if not 1 <= min_signers <= N:
+                raise BadArgumentError("Either the redeem script provided is invalid or the keypaths provided are insufficient")
+
+            if not script[-1] == 0xAE:
+                raise BadArgumentError("The redeem script provided is not a multisig. Only multisig scripts can be displayed.")
+
+            if not script[-2] == 80 + N:
+                raise BadArgumentError("Invalid redeem script, second last byte should encode N")
+
+            xfp_paths = []
+            for xfp in keypaths:
+                if '/' not in xfp:
+                    raise BadArgumentError('Invalid keypath. Needs a XFP/path: ' + xfp)
+                xfp, p = xfp.split('/', 1)
+
+                xfp_paths.append(str_to_int_path(xfp, p))
+
+            payload = CCProtocolPacker.show_p2sh_address(min_signers, xfp_paths, script, addr_fmt=addr_fmt)
+        # single-sig
+        else:
+            payload = CCProtocolPacker.show_address(keypath, addr_fmt=addr_fmt)
+
+        address = self.device.send_recv(payload, timeout=None)
+
         if self.device.is_simulator:
             self.device.send_recv(CCProtocolPacker.sim_keypress(b'y'))
         return {'address': address}
@@ -197,7 +292,7 @@ class ColdcardClient(HardwareWalletClient):
         raise UnavailableActionError('The Coldcard does not support wiping via software')
 
     # Restore device from mnemonic or xprv
-    def restore_device(self, label=''):
+    def restore_device(self, label='', word_count=24):
         raise UnavailableActionError('The Coldcard does not support restoring via software')
 
     # Begin backup process
@@ -242,6 +337,10 @@ class ColdcardClient(HardwareWalletClient):
     def send_pin(self, pin):
         raise UnavailableActionError('The Coldcard does not need a PIN sent from the host')
 
+    # Toggle passphrase
+    def toggle_passphrase(self):
+        raise UnavailableActionError('The Coldcard does not support toggling passphrase from the host')
+
 def enumerate(password=''):
     results = []
     devices = hid.enumerate(COINKITE_VID, CKCC_PID)
@@ -263,7 +362,7 @@ def enumerate(password=''):
         with handle_errors(common_err_msgs["enumerate"], d_data):
             try:
                 client = ColdcardClient(path)
-                d_data['fingerprint'] = client._get_fingerprint_hex()
+                d_data['fingerprint'] = client.get_master_fingerprint_hex()
             except RuntimeError as e:
                 # Skip the simulator if it's not there
                 if str(e) == 'Cannot connect to simulator. Is it running?':

@@ -84,7 +84,7 @@ class btchip:
 				self.scriptBlockLength = 50
 			else:
 				self.scriptBlockLength = 255
-		except:
+		except Exception:
 			pass			
 
 	def getWalletPublicKey(self, path, showOnScreen=False, segwit=False, segwitNative=False, cashAddr=False):
@@ -172,7 +172,7 @@ class btchip:
 		result['value'] = response
 		return result
 
-	def startUntrustedTransaction(self, newTransaction, inputIndex, outputList, redeemScript, version=0x01, cashAddr=False):
+	def startUntrustedTransaction(self, newTransaction, inputIndex, outputList, redeemScript, version=0x01, cashAddr=False, continueSegwit=False):
 		# Start building a fake transaction with the passed inputs
 		segwit = False
 		if newTransaction:
@@ -186,7 +186,7 @@ class btchip:
 			else:
 				p2 = 0x00
 		else:
-				p2 = 0x80
+				p2 = 0x10 if continueSegwit else 0x80
 		apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x00, p2 ]
 		params = bytearray([version, 0x00, 0x00, 0x00])
 		writeVarint(len(outputList), params)
@@ -203,10 +203,10 @@ class btchip:
 			apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00 ]
 			params = []
 			script = bytearray(redeemScript)
-			if ('witness' in passedOutput) and passedOutput['witness']:
-				params.append(0x02)
-			elif ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
+			if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
 				params.append(0x01)
+			elif ('witness' in passedOutput) and passedOutput['witness']:
+				params.append(0x02)
 			else:
 				params.append(0x00)
 			if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
@@ -215,8 +215,6 @@ class btchip:
 			if currentIndex != inputIndex:
 				script = bytearray()
 			writeVarint(len(script), params)
-			if len(script) == 0:
-				params.extend(sequence)
 			apdu.append(len(params))
 			apdu.extend(params)
 			self.dongle.exchange(bytearray(apdu))
@@ -234,6 +232,10 @@ class btchip:
 				apdu.extend(params)
 				self.dongle.exchange(bytearray(apdu))
 				offset += blockLength
+			if len(script) == 0:
+			    apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00, len(sequence) ]
+			    apdu.extend(sequence)
+			    self.dongle.exchange(bytearray(apdu))
 			currentIndex += 1
 
 	def finalizeInput(self, outputAddress, amount, fees, changePath, rawTx=None):
@@ -269,7 +271,7 @@ class btchip:
 					response = self.dongle.exchange(bytearray(apdu))
 					offset += dataLength
 				alternateEncoding = True
-			except:
+			except Exception:
 				pass
 		if not alternateEncoding:
 			apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_FINALIZE, 0x02, 0x00 ]
@@ -397,5 +399,8 @@ class btchip:
 				raise
 		result['compressedKeys'] = (response[0] == 0x01)
 		result['version'] = "%d.%d.%d" % (response[2], response[3], response[4])
+		result['major_version'] = response[2]
+		result['minor_version'] = response[3]
+		result['patch_version'] = response[4]
 		result['specialVersion'] = response[1]
 		return result

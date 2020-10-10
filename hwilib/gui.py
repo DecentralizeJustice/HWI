@@ -3,12 +3,15 @@
 import json
 import logging
 import sys
+import time
+from typing import Callable
 
 from . import commands, __version__
 from .cli import HWIArgumentParser
 from .errors import handle_errors, DEVICE_NOT_INITIALIZED
 
 try:
+    from .ui.ui_bitbox02pairing import Ui_BitBox02PairingDialog
     from .ui.ui_displayaddressdialog import Ui_DisplayAddressDialog
     from .ui.ui_getxpubdialog import Ui_GetXpubDialog
     from .ui.ui_getkeypooloptionsdialog import Ui_GetKeypoolOptionsDialog
@@ -23,7 +26,9 @@ except ImportError:
 
 from PySide2.QtGui import QRegExpValidator
 from PySide2.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLineEdit, QMessageBox, QMainWindow
-from PySide2.QtCore import QRegExp, Signal, Slot
+from PySide2.QtCore import QCoreApplication, QRegExp, Signal, Slot
+
+import bitbox02.util
 
 def do_command(f, *args, **kwargs):
     result = {}
@@ -47,7 +52,7 @@ class SetPassphraseDialog(QDialog):
 class SendPinDialog(QDialog):
     pin_sent_success = Signal()
 
-    def __init__(self, client):
+    def __init__(self, client, prompt_pin=True):
         super(SendPinDialog, self).__init__()
         self.ui = Ui_SendPinDialog()
         self.ui.setupUi(self)
@@ -68,7 +73,8 @@ class SendPinDialog(QDialog):
         self.ui.p9_button.clicked.connect(self.button_clicked(9))
 
         self.accepted.connect(self.sendpindialog_accepted)
-        do_command(commands.prompt_pin, self.client)
+        if prompt_pin:
+            do_command(commands.prompt_pin, self.client)
 
     def button_clicked(self, number):
         @Slot()
@@ -206,6 +212,50 @@ class GetKeypoolOptionsDialog(QDialog):
             self.ui.path_lineedit.setEnabled(True)
             self.ui.account_spinbox.setEnabled(False)
 
+class BitBox02PairingDialog(QDialog):
+    def __init__(self, pairing_code: str, device_response: Callable[[], bool]):
+        super(BitBox02PairingDialog, self).__init__()
+        self.ui = Ui_BitBox02PairingDialog()
+        self.ui.setupUi(self)
+        self.setWindowTitle('Verify BitBox02 pairing code')
+        self.ui.pairingCode.setText(pairing_code.replace("\n", "<br>"))
+        self.ui.buttonBox.setEnabled(False)
+        self.device_response = device_response
+        self.painted = False
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        self.painted = True
+
+    def enable_buttons(self):
+        self.ui.buttonBox.setEnabled(True)
+
+class BitBox02NoiseConfig(bitbox02.util.BitBoxAppNoiseConfig):
+    """ GUI elements to perform the BitBox02 pairing and attestatoin check """
+
+    def show_pairing(self, code: str, device_response: Callable[[], bool]) -> bool:
+        dialog = BitBox02PairingDialog(code, device_response)
+        dialog.show()
+        # render the window since the next operation is blocking
+        while True:
+            QCoreApplication.processEvents()
+            if dialog.painted:
+                break
+            time.sleep(0.1)
+        if not device_response():
+            return False
+        dialog.enable_buttons()
+        dialog.exec_()
+        return dialog.result() == QDialog.Accepted
+
+    def attestation_check(self, result: bool) -> None:
+        if not result:
+            QMessageBox.warning(
+                None,
+                "BitBox02 attestation check",
+                "BitBox02 attestation check failed. Your BitBox02 might not be genuine. Please contact support@shiftcrypto.ch if the problem persists.",
+            )
+
 class HWIQt(QMainWindow):
     def __init__(self, passphrase='', testnet=False):
         super(HWIQt, self).__init__()
@@ -233,12 +283,13 @@ class HWIQt(QMainWindow):
 
         self.ui.enumerate_refresh_button.clicked.connect(self.refresh_clicked)
         self.ui.setpass_button.clicked.connect(self.show_setpassphrasedialog)
-        self.ui.sendpin_button.clicked.connect(self.show_sendpindialog)
+        self.ui.sendpin_button.clicked.connect(lambda: self.show_sendpindialog(prompt_pin=True))
         self.ui.getxpub_button.clicked.connect(self.show_getxpubdialog)
         self.ui.signtx_button.clicked.connect(self.show_signpsbtdialog)
         self.ui.signmsg_button.clicked.connect(self.show_signmessagedialog)
         self.ui.display_addr_button.clicked.connect(self.show_displayaddressdialog)
         self.ui.getkeypool_opts_button.clicked.connect(self.show_getkeypooloptionsdialog)
+        self.ui.toggle_passphrase_button.clicked.connect(self.toggle_passphrase)
 
         self.ui.enumerate_combobox.currentIndexChanged.connect(self.get_client_and_device_info)
 
@@ -248,6 +299,7 @@ class HWIQt(QMainWindow):
         self.ui.signmsg_button.setEnabled(False)
         self.ui.display_addr_button.setEnabled(False)
         self.ui.getkeypool_opts_button.setEnabled(False)
+        self.ui.toggle_passphrase_button.setEnabled(False)
         self.ui.keypool_textedit.clear()
         self.ui.desc_textedit.clear()
 
@@ -290,7 +342,6 @@ class HWIQt(QMainWindow):
 
         self.ui.getxpub_button.setEnabled(True)
         self.ui.signtx_button.setEnabled(True)
-        self.ui.signmsg_button.setEnabled(True)
         self.ui.display_addr_button.setEnabled(True)
         self.ui.getkeypool_opts_button.setEnabled(True)
 
@@ -298,6 +349,14 @@ class HWIQt(QMainWindow):
         self.device_info = self.devices[index - 1]
         self.client = commands.get_client(self.device_info['model'], self.device_info['path'], self.passphrase)
         self.client.is_testnet = self.testnet
+
+        if self.device_info['type'] == 'bitbox02':
+            self.client.set_noise_config(BitBox02NoiseConfig())
+
+        self.ui.setpass_button.setEnabled(self.device_info['type'] != 'bitbox02')
+        self.ui.signmsg_button.setEnabled(self.device_info['type'] != 'bitbox02')
+        self.ui.toggle_passphrase_button.setEnabled(self.device_info['type'] in ('trezor', 'keepkey', 'bitbox02', ))
+
         self.get_device_info()
 
     def get_device_info(self):
@@ -331,8 +390,8 @@ class HWIQt(QMainWindow):
         self.ui.desc_textedit.setPlainText(json.dumps(descriptors, indent=2))
 
     @Slot()
-    def show_sendpindialog(self):
-        self.current_dialog = SendPinDialog(self.client)
+    def show_sendpindialog(self, prompt_pin=True):
+        self.current_dialog = SendPinDialog(self.client, prompt_pin)
         self.current_dialog.pin_sent_success.connect(self.sendpindialog_accepted)
         self.current_dialog.exec_()
 
@@ -386,6 +445,12 @@ class HWIQt(QMainWindow):
             self.getkeypool_opts['account_used'] = False
         self.current_dialog = None
         self.get_device_info()
+
+    @Slot()
+    def toggle_passphrase(self):
+        do_command(commands.toggle_passphrase, self.client)
+        if self.device_info['model'] == "keepkey":
+            self.show_sendpindialog(prompt_pin=False)
 
 def process_gui_commands(cli_args):
     parser = HWIArgumentParser(description='Hardware Wallet Interface Qt, version {}.\nInteractively access and send commands to a hardware wallet device with a GUI. Responses are in JSON format.'.format(__version__))

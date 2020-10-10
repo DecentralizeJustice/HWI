@@ -13,12 +13,42 @@ import logging
 import socket
 import sys
 import time
+from typing import Dict, Union
 
 from ..hwwclient import HardwareWalletClient
-from ..errors import ActionCanceledError, BadArgumentError, DeviceFailureError, DeviceAlreadyInitError, DEVICE_NOT_INITIALIZED, DeviceNotReadyError, NoPasswordError, UnavailableActionError, common_err_msgs, handle_errors
-from ..serializations import CTransaction, ExtendedKey, hash256, ser_sig_der, ser_sig_compact, ser_compact_size
-from ..base58 import get_xpub_fingerprint, xpub_main_2_test, get_xpub_fingerprint_hex
-
+from ..errors import (
+    ActionCanceledError,
+    BadArgumentError,
+    DeviceFailureError,
+    DeviceAlreadyInitError,
+    DEVICE_NOT_INITIALIZED,
+    DeviceNotReadyError,
+    NoPasswordError,
+    UnavailableActionError,
+    common_err_msgs,
+    handle_errors,
+)
+from ..key import (
+    ExtendedKey,
+)
+from ..serializations import (
+    CTransaction,
+    hash256,
+    is_p2pk,
+    is_p2pkh,
+    is_p2sh,
+    is_p2wpkh,
+    is_p2wsh,
+    is_witness,
+    ser_sig_der,
+    ser_sig_compact,
+    ser_string,
+    ser_compact_size,
+)
+from ..base58 import (
+    get_xpub_fingerprint,
+    xpub_main_2_test,
+)
 applen = 225280 # flash size minus bootloader length
 chunksize = 8 * 512
 usb_report_size = 64 # firmware > v2.0
@@ -345,18 +375,39 @@ class DigitalbitboxClient(HardwareWalletClient):
         sighash_tuples = []
         for txin, psbt_in, i_num in zip(blank_tx.vin, tx.inputs, range(len(blank_tx.vin))):
             sighash = b""
+            utxo = None
+            if psbt_in.witness_utxo:
+                utxo = psbt_in.witness_utxo
             if psbt_in.non_witness_utxo:
+                if txin.prevout.hash != psbt_in.non_witness_utxo.sha256:
+                    raise BadArgumentError('Input {} has a non_witness_utxo with the wrong hash'.format(i_num))
                 utxo = psbt_in.non_witness_utxo.vout[txin.prevout.n]
+            if utxo is None:
+                continue
+            scriptcode = utxo.scriptPubKey
 
-                # Check if P2SH
-                if utxo.is_p2sh():
-                    # Look up redeemscript
-                    redeemscript = psbt_in.redeem_script
+            # Check if P2SH
+            p2sh = False
+            if is_p2sh(scriptcode):
+                # Look up redeemscript
+                if len(psbt_in.redeem_script) == 0:
+                    continue
+                scriptcode = psbt_in.redeem_script
+                p2sh = True
+
+            is_wit, _, _ = is_witness(scriptcode)
+
+            # Check if P2WSH
+            if is_p2wsh(scriptcode):
+                # Look up witnessscript
+                if len(psbt_in.witness_script) == 0:
+                    continue
+                scriptcode = psbt_in.witness_script
+
+            if not is_wit:
+                if p2sh or is_p2pkh(scriptcode) or is_p2pk(scriptcode):
                     # Add to blank_tx
-                    txin.scriptSig = redeemscript
-                # Check if P2PKH
-                elif utxo.is_p2pkh() or utxo.is_p2pk():
-                    txin.scriptSig = psbt_in.non_witness_utxo.vout[txin.prevout.n].scriptPubKey
+                    txin.scriptSig = scriptcode
                 # We don't know what this is, skip it
                 else:
                     continue
@@ -368,7 +419,7 @@ class DigitalbitboxClient(HardwareWalletClient):
                 # Hash it
                 sighash += hash256(ser_tx)
                 txin.scriptSig = b""
-            elif psbt_in.witness_utxo:
+            else:
                 # Calculate hashPrevouts and hashSequence
                 prevouts_preimage = b""
                 sequence_preimage = b""
@@ -384,25 +435,10 @@ class DigitalbitboxClient(HardwareWalletClient):
                     outputs_preimage += output.serialize()
                 hashOutputs = hash256(outputs_preimage)
 
-                # Get the scriptCode
-                scriptCode = b""
-                witness_program = b""
-                if psbt_in.witness_utxo.is_p2sh():
-                    # Look up redeemscript
-                    redeemscript = psbt_in.redeem_script
-                    witness_program = redeemscript
-                else:
-                    witness_program = psbt_in.witness_utxo.scriptPubKey
-
-                # Check if witness_program is script hash
-                if len(witness_program) == 34 and witness_program[0] == 0x00 and witness_program[1] == 0x20:
-                    # look up witnessscript and set as scriptCode
-                    witnessscript = psbt_in.witness_script
-                    scriptCode += ser_compact_size(len(witnessscript)) + witnessscript
-                else:
-                    scriptCode += b"\x19\x76\xa9\x14"
-                    scriptCode += witness_program[2:]
-                    scriptCode += b"\x88\xac"
+                # Check if scriptcode is p2wpkh
+                if is_p2wpkh(scriptcode):
+                    _, _, wit_prog = is_witness(scriptcode)
+                    scriptcode = b"\x76\xa9\x14" + wit_prog + b"\x88\xac"
 
                 # Make sighash preimage
                 preimage = b""
@@ -410,7 +446,7 @@ class DigitalbitboxClient(HardwareWalletClient):
                 preimage += hashPrevouts
                 preimage += hashSequence
                 preimage += txin.prevout.serialize()
-                preimage += scriptCode
+                preimage += ser_string(scriptcode)
                 preimage += struct.pack("<q", psbt_in.witness_utxo.nValue)
                 preimage += struct.pack("<I", txin.nSequence)
                 preimage += hashOutputs
@@ -422,15 +458,9 @@ class DigitalbitboxClient(HardwareWalletClient):
 
             # Figure out which keypath thing is for this input
             for pubkey, keypath in psbt_in.hd_keypaths.items():
-                if master_fp == keypath[0]:
+                if master_fp == keypath.fingerprint:
                     # Add the keypath strings
-                    keypath_str = 'm'
-                    for index in keypath[1:]:
-                        keypath_str += '/'
-                        if index >= 0x80000000:
-                            keypath_str += str(index - 0x80000000) + 'h'
-                        else:
-                            keypath_str += str(index)
+                    keypath_str = keypath.get_derivation_path()
 
                     # Create tuples and add to List
                     tup = (binascii.hexlify(sighash).decode(), keypath_str, i_num, pubkey)
@@ -479,14 +509,15 @@ class DigitalbitboxClient(HardwareWalletClient):
 
         return {'psbt': tx.serialize()}
 
-    # Must return a base64 encoded string with the signed message
-    # The message can be any string
     @digitalbitbox_exception
-    def sign_message(self, message, keypath):
+    def sign_message(self, message: Union[str, bytes], keypath: str) -> Dict[str, str]:
         to_hash = b""
         to_hash += self.message_magic
         to_hash += ser_compact_size(len(message))
-        to_hash += message.encode()
+        if isinstance(message, bytes):
+            to_hash += message
+        else:
+            to_hash += message.encode()
 
         hashed_message = hash256(to_hash)
 
@@ -515,8 +546,8 @@ class DigitalbitboxClient(HardwareWalletClient):
 
         return {"signature": base64.b64encode(compact_sig).decode('utf-8')}
 
-    # Display address of specified type on the device. Only supports single-key based addresses.
-    def display_address(self, keypath, p2sh_p2wpkh, bech32):
+    # Display address of specified type on the device.
+    def display_address(self, keypath, p2sh_p2wpkh, bech32, redeem_script=None, descriptor=None):
         raise UnavailableActionError('The Digital Bitbox does not have a screen to display addresses on')
 
     # Setup a new device
@@ -553,7 +584,7 @@ class DigitalbitboxClient(HardwareWalletClient):
         return {'success': True}
 
     # Restore device from mnemonic or xprv
-    def restore_device(self, label=''):
+    def restore_device(self, label='', word_count=24):
         raise UnavailableActionError('The Digital Bitbox does not support restoring via software')
 
     # Begin backup process
@@ -583,6 +614,10 @@ class DigitalbitboxClient(HardwareWalletClient):
     def send_pin(self, pin):
         raise UnavailableActionError('The Digital Bitbox does not need a PIN sent from the host')
 
+    # Toggle passphrase
+    def toggle_passphrase(self):
+        raise UnavailableActionError('The Digital Bitbox does not support toggling passphrase from the host')
+
 def enumerate(password=''):
     results = []
     devices = hid.enumerate(DBB_VENDOR_ID, DBB_DEVICE_ID)
@@ -592,7 +627,7 @@ def enumerate(password=''):
         dev.send_recv(b'{"device" : "info"}')
         devices.append({'path': b'udp:127.0.0.1:35345', 'interface_number': 0})
         dev.close()
-    except:
+    except Exception:
         pass
     for d in devices:
         if ('interface_number' in d and d['interface_number'] == 0
@@ -616,8 +651,7 @@ def enumerate(password=''):
                     d_data['error'] = 'Not initialized'
                     d_data['code'] = DEVICE_NOT_INITIALIZED
                 else:
-                    master_xpub = client.get_pubkey_at_path('m/0h')['xpub']
-                    d_data['fingerprint'] = get_xpub_fingerprint_hex(master_xpub)
+                    d_data['fingerprint'] = client.get_master_fingerprint_hex()
                 d_data['needs_pin_sent'] = False
                 d_data['needs_passphrase_sent'] = True
 

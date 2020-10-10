@@ -28,7 +28,7 @@ def digitalbitbox_test_suite(simulator, rpc, userpass, interface):
             reply = send_plain(b'{"password":"0000"}', dev)
             if 'error' not in reply:
                 break
-        except:
+        except Exception:
             pass
         time.sleep(0.5)
     # Cleanup
@@ -133,6 +133,9 @@ def digitalbitbox_test_suite(simulator, rpc, userpass, interface):
             self.assertTrue(result['success'])
 
     class TestBitboxGetXpub(DeviceTestCase):
+        def setUp(self):
+            self.dev_args.remove('--testnet')
+
         def test_getxpub(self):
             result = self.do_command(self.dev_args + ['--expert', 'getxpub', 'm/44h/0h/0h/3'])
             self.assertEqual(result['xpub'], 'xpub6Du9e5Cz1NZWz3dvsvM21tsj4xEdbAb7AcbysFL42Y3yr8PLMnsaxhetHxurTpX5Rp5RbnFFwP1wct8K3gErCUSwcxFhxThsMBSxdmkhTNf')

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script which sets up Wine and builds the Windows standalone binary
 
-set -e
+set -ex
 
 PYTHON_VERSION=3.6.8
 
@@ -58,7 +58,7 @@ popd
 $PYTHON -m pip install -U pip
 
 # Install Poetry and things needed for pyinstaller
-$PYTHON -m pip install poetry
+$PYTHON -m pip install poetry==1.0.10
 
 # We also need to change the timestamps of all of the base library files
 lib_dir=~/.wine/drive_c/python3/Lib
@@ -67,7 +67,7 @@ TZ=UTC find ${lib_dir} -name '*.py' -type f -execdir touch -t "201901010000.00" 
 # Install python dependencies
 POETRY="wine $PYHOME/Scripts/poetry.exe"
 sleep 5 # For some reason, pausing for a few seconds makes the next step work
-$POETRY install
+$POETRY install -E qt
 
 # make the ui files
 pushd hwilib/ui

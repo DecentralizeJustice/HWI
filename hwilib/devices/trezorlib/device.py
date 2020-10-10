@@ -14,6 +14,7 @@
 # You should have received a copy of the License along with this library.
 # If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
+import logging
 import os
 import time
 import warnings
@@ -24,6 +25,8 @@ from .tools import expect, session
 from .transport import enumerate_devices, get_transport
 
 RECOVERY_BACK = "\x08"  # backspace character, sent literally
+
+LOG = logging.getLogger(__name__)
 
 
 class TrezorDevice:
@@ -51,8 +54,9 @@ def apply_settings(
     language=None,
     use_passphrase=None,
     homescreen=None,
-    passphrase_source=None,
+    passphrase_always_on_device=None,
     auto_lock_delay_ms=None,
+    display_rotation=None,
 ):
     settings = proto.ApplySettings()
     if label is not None:
@@ -63,10 +67,12 @@ def apply_settings(
         settings.use_passphrase = use_passphrase
     if homescreen is not None:
         settings.homescreen = homescreen
-    if passphrase_source is not None:
-        settings.passphrase_source = passphrase_source
+    if passphrase_always_on_device is not None:
+        settings.passphrase_always_on_device = passphrase_always_on_device
     if auto_lock_delay_ms is not None:
         settings.auto_lock_delay_ms = auto_lock_delay_ms
+    if display_rotation is not None:
+        settings.display_rotation = display_rotation
 
     out = client.call(settings)
     client.init_device()  # Reload Features
@@ -189,7 +195,7 @@ def reset(
         raise RuntimeError("Invalid response, expected EntropyRequest")
 
     external_entropy = os.urandom(32)
-    # LOG.debug("Computer generated entropy: " + external_entropy.hex())
+    LOG.debug("Computer generated entropy: " + external_entropy.hex())
     ret = client.call(proto.EntropyAck(entropy=external_entropy))
     client.init_device()
     return ret

@@ -1,15 +1,32 @@
 #! /usr/bin/env python3
 
-from .commands import backup_device, displayaddress, enumerate, find_device, \
-    get_client, getmasterxpub, getxpub, getkeypool, getdescriptors, prompt_pin, restore_device, send_pin, setup_device, \
-    signmessage, signtx, wipe_device, install_udev_rules
+from .commands import (
+    backup_device,
+    displayaddress,
+    enumerate,
+    find_device,
+    get_client,
+    getmasterxpub,
+    getxpub,
+    getkeypool,
+    getdescriptors,
+    prompt_pin,
+    toggle_passphrase,
+    restore_device,
+    send_pin,
+    setup_device,
+    signmessage,
+    signtx,
+    wipe_device,
+    install_udev_rules,
+)
 from .errors import (
     handle_errors,
     DEVICE_CONN_ERROR,
     HELP_TEXT,
     MISSING_ARGUMENTS,
     NO_DEVICE_TYPE,
-    UNAVAILABLE_ACTION
+    UNAVAILABLE_ACTION,
 )
 from . import __version__
 
@@ -23,7 +40,7 @@ def backup_device_handler(args, client):
     return backup_device(client, label=args.label, backup_passphrase=args.backup_passphrase)
 
 def displayaddress_handler(args, client):
-    return displayaddress(client, desc=args.desc, path=args.path, sh_wpkh=args.sh_wpkh, wpkh=args.wpkh)
+    return displayaddress(client, desc=args.desc, path=args.path, sh_wpkh=args.sh_wpkh, wpkh=args.wpkh, redeem_script=args.redeem_script)
 
 def enumerate_handler(args):
     return enumerate(password=args.password)
@@ -35,14 +52,14 @@ def getxpub_handler(args, client):
     return getxpub(client, path=args.path)
 
 def getkeypool_handler(args, client):
-    return getkeypool(client, path=args.path, start=args.start, end=args.end, internal=args.internal, keypool=args.keypool, account=args.account, sh_wpkh=args.sh_wpkh, wpkh=args.wpkh)
+    return getkeypool(client, path=args.path, start=args.start, end=args.end, internal=args.internal, keypool=args.keypool, account=args.account, sh_wpkh=args.sh_wpkh, wpkh=args.wpkh, addr_all=args.all)
 
 def getdescriptors_handler(args, client):
     return getdescriptors(client, account=args.account)
 
 def restore_device_handler(args, client):
     if args.interactive:
-        return restore_device(client, label=args.label)
+        return restore_device(client, label=args.label, word_count=args.word_count)
     return {'error': 'restore requires interactive mode', 'code': UNAVAILABLE_ACTION}
 
 def setup_device_handler(args, client):
@@ -61,6 +78,9 @@ def wipe_device_handler(args, client):
 
 def prompt_pin_handler(args, client):
     return prompt_pin(client)
+
+def toggle_passphrase_handler(args, client):
+    return toggle_passphrase(client)
 
 def send_pin_handler(args, client):
     return send_pin(client, pin=args.pin)
@@ -137,8 +157,10 @@ def process_commands(cli_args):
     kparg_group.add_argument('--keypool', action='store_true', dest='keypool', help='Indicates that the keys are to be imported to the keypool', default=True)
     kparg_group.add_argument('--nokeypool', action='store_false', dest='keypool', help='Indicates that the keys are not to be imported to the keypool', default=False)
     getkeypool_parser.add_argument('--internal', action='store_true', help='Indicates that the keys are change keys')
-    getkeypool_parser.add_argument('--sh_wpkh', action='store_true', help='Generate p2sh-nested segwit addresses (default path: m/49h/0h/0h/[0,1]/*)')
-    getkeypool_parser.add_argument('--wpkh', action='store_true', help='Generate bech32 addresses (default path: m/84h/0h/0h/[0,1]/*)')
+    kp_type_group = getkeypool_parser.add_mutually_exclusive_group()
+    kp_type_group.add_argument('--sh_wpkh', action='store_true', help='Generate p2sh-nested segwit addresses (default path: m/49h/0h/0h/[0,1]/*)')
+    kp_type_group.add_argument('--wpkh', action='store_true', help='Generate bech32 addresses (default path: m/84h/0h/0h/[0,1]/*)')
+    kp_type_group.add_argument('--all', action='store_true', help='Generate addresses for all standard address types (default paths: m/{44,49,84}h/0h/0h/[0,1]/*)')
     getkeypool_parser.add_argument('--account', help='BIP43 account', type=int, default=0)
     getkeypool_parser.add_argument('--path', help='Derivation path, default follows BIP43 convention, e.g. m/84h/0h/0h/1/* with --wpkh --internal. If this argument and --internal is not given, both internal and external keypools will be returned.')
     getkeypool_parser.add_argument('start', type=int, help='The index to start at.')
@@ -155,6 +177,7 @@ def process_commands(cli_args):
     group.add_argument('--path', help='The BIP 32 derivation path of the key embedded in the address, default follows BIP43 convention, e.g. m/84h/0h/0h/1/*')
     displayaddr_parser.add_argument('--sh_wpkh', action='store_true', help='Display the p2sh-nested segwit address associated with this key path')
     displayaddr_parser.add_argument('--wpkh', action='store_true', help='Display the bech32 version of the address associated with this key path')
+    displayaddr_parser.add_argument('--redeem_script', help='P2SH redeem script')
     displayaddr_parser.set_defaults(func=displayaddress_handler)
 
     setupdev_parser = subparsers.add_parser('setup', help='Setup a device. Passphrase protection uses the password given by -p. Requires interactive mode')
@@ -166,6 +189,7 @@ def process_commands(cli_args):
     wipedev_parser.set_defaults(func=wipe_device_handler)
 
     restore_parser = subparsers.add_parser('restore', help='Initiate the device restoring process. Requires interactive mode')
+    restore_parser.add_argument('--word_count', '-w', help='Word count of your BIP39 recovery phrase (options: 12/18/24)', type=int, default=24)
     restore_parser.add_argument('--label', '-l', help='The name to give to the device', default='')
     restore_parser.set_defaults(func=restore_device_handler)
 
@@ -176,6 +200,9 @@ def process_commands(cli_args):
 
     promptpin_parser = subparsers.add_parser('promptpin', help='Have the device prompt for your PIN')
     promptpin_parser.set_defaults(func=prompt_pin_handler)
+
+    togglepassphrase_parser = subparsers.add_parser('togglepassphrase', help='Toggle BIP39 passphrase protection')
+    togglepassphrase_parser.set_defaults(func=toggle_passphrase_handler)
 
     sendpin_parser = subparsers.add_parser('sendpin', help='Send the numeric positions for your PIN to the device')
     sendpin_parser.add_argument('pin', help='The numeric positions of the PIN')
