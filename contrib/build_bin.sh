@@ -12,14 +12,14 @@ pip install poetry==1.0.10
 poetry install -E qt
 
 # We now need to remove debugging symbols and build id from the hidapi SO file
-so_dir=`dirname $(dirname $(poetry run which python))`/lib/python3.6/site-packages
+so_dir=`dirname $(dirname $(poetry run which python))`/lib/python3.7/site-packages
 strip -x ${so_dir}/hid*.so
 if [[ $OSTYPE != *"darwin"* ]]; then
     strip -R .note.gnu.build-id ${so_dir}/hid*.so
 fi
 
 # We also need to change the timestamps of all of the base library files
-lib_dir=`pyenv root`/versions/3.6.8/lib/python3.6
+lib_dir=`pyenv root`/versions/3.7.7/lib/python3.7
 TZ=UTC find ${lib_dir} -name '*.py' -type f -execdir touch -t "201901010000.00" '{}' \;
 
 # Make the standalone binary
